@@ -1,0 +1,195 @@
+{
+  "environment": {
+    "python": "3.12.10",
+    "platform": "macOS-15.6.1-arm64-arm-64bit",
+    "ortools": "9.15.6755",
+    "solver_workers": 1
+  },
+  "command": "python -m src.evaluate --time-limit 5.0",
+  "search_budget_seconds": 5.0,
+  "notes": "Search budget excludes preprocessing; total runtimes include it. Wall-clock timeouts may vary. Outage comparison uses the same pre-outage greedy schedule as the reference for both algorithms.",
+  "scenarios": [
+    {
+      "scenario": "small_feasible",
+      "participants": 3,
+      "visits": 9,
+      "seed": 11,
+      "existing_appointments": 0,
+      "greedy": {
+        "scheduled": 9,
+        "unscheduled": 0,
+        "violations": 0,
+        "existing_changes": 0,
+        "target_deviation_days": 2,
+        "runtime_seconds": 0.011700332979671657
+      },
+      "cp_sat": {
+        "scheduled": 9,
+        "unscheduled": 0,
+        "violations": 0,
+        "existing_changes": 0,
+        "target_deviation_days": 2,
+        "status": "OPTIMAL",
+        "optimal": true,
+        "runtime_seconds": 0.09527662501204759,
+        "candidate_count": 834,
+        "stages": [
+          {
+            "name": "scheduled_count",
+            "status": "OPTIMAL",
+            "runtime_seconds": 0.028150875004939735,
+            "objective": 9.0,
+            "best_bound": 9.0
+          },
+          {
+            "name": "existing_changes",
+            "status": "OPTIMAL",
+            "runtime_seconds": 0.0,
+            "objective": 0.0,
+            "best_bound": 0.0
+          },
+          {
+            "name": "target_deviation",
+            "status": "OPTIMAL",
+            "runtime_seconds": 0.029049833014141768,
+            "objective": 2.0,
+            "best_bound": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "baseline_30",
+      "participants": 30,
+      "visits": 90,
+      "seed": 23,
+      "existing_appointments": 0,
+      "greedy": {
+        "scheduled": 90,
+        "unscheduled": 0,
+        "violations": 0,
+        "existing_changes": 0,
+        "target_deviation_days": 25,
+        "runtime_seconds": 0.43300725001608953
+      },
+      "cp_sat": {
+        "scheduled": 90,
+        "unscheduled": 0,
+        "violations": 0,
+        "existing_changes": 0,
+        "target_deviation_days": 25,
+        "status": "FEASIBLE",
+        "optimal": false,
+        "runtime_seconds": 5.802460125007201,
+        "candidate_count": 16940,
+        "stages": [
+          {
+            "name": "scheduled_count",
+            "status": "OPTIMAL",
+            "runtime_seconds": 2.4564869590103626,
+            "objective": 90.0,
+            "best_bound": 90.0
+          },
+          {
+            "name": "existing_changes",
+            "status": "OPTIMAL",
+            "runtime_seconds": 0.0,
+            "objective": 0.0,
+            "best_bound": 0.0
+          },
+          {
+            "name": "target_deviation",
+            "status": "UNKNOWN",
+            "runtime_seconds": 2.5122502909507602,
+            "objective": null,
+            "best_bound": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "tight_capacity",
+      "participants": 30,
+      "visits": 90,
+      "seed": 23,
+      "existing_appointments": 0,
+      "greedy": {
+        "scheduled": 37,
+        "unscheduled": 53,
+        "violations": 0,
+        "existing_changes": 0,
+        "target_deviation_days": 36,
+        "runtime_seconds": 0.2416673750267364
+      },
+      "cp_sat": {
+        "scheduled": 47,
+        "unscheduled": 43,
+        "violations": 0,
+        "existing_changes": 0,
+        "target_deviation_days": 44,
+        "status": "FEASIBLE",
+        "optimal": false,
+        "runtime_seconds": 5.360025166999549,
+        "candidate_count": 1305,
+        "stages": [
+          {
+            "name": "scheduled_count",
+            "status": "FEASIBLE",
+            "runtime_seconds": 5.00100766698597,
+            "objective": 47.0,
+            "best_bound": 68.0
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "equipment_outage",
+      "participants": 30,
+      "visits": 90,
+      "seed": 23,
+      "existing_appointments": 90,
+      "greedy": {
+        "scheduled": 68,
+        "unscheduled": 22,
+        "violations": 0,
+        "existing_changes": 51,
+        "target_deviation_days": 35,
+        "runtime_seconds": 1.0972893749712966
+      },
+      "cp_sat": {
+        "scheduled": 78,
+        "unscheduled": 12,
+        "violations": 0,
+        "existing_changes": 32,
+        "target_deviation_days": 45,
+        "status": "FEASIBLE",
+        "optimal": false,
+        "runtime_seconds": 6.375370334018953,
+        "candidate_count": 11220,
+        "stages": [
+          {
+            "name": "scheduled_count",
+            "status": "OPTIMAL",
+            "runtime_seconds": 1.140719374991022,
+            "objective": 78.0,
+            "best_bound": 78.0
+          },
+          {
+            "name": "existing_changes",
+            "status": "OPTIMAL",
+            "runtime_seconds": 1.1236253749812022,
+            "objective": 32.0,
+            "best_bound": 32.0
+          },
+          {
+            "name": "target_deviation",
+            "status": "FEASIBLE",
+            "runtime_seconds": 2.66335537499981,
+            "objective": 45.0,
+            "best_bound": 36.0
+          }
+        ]
+      }
+    }
+  ]
+}

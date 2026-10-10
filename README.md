@@ -1,11 +1,10 @@
 # Clinical Trial Visit Scheduler
 
-A local clinical trial visit scheduler using synthetic data. The first implementation provides shared domain models, inclusive date windows, a deterministic greedy baseline, and an independent appointment validator.
+A local clinical trial visit scheduler using synthetic data. Includes shared domain models, inclusive date windows, a greedy baseline, CP-SAT optimization and repair, and an independent appointment validator.
 
 ## Development
 
-Python 3.11 or newer is required. The scheduling core uses only the standard library; the
-Streamlit application adds the dependencies pinned in `requirements.txt`.
+Python 3.11 or newer is required. Install the application and OR-Tools dependencies pinned in `requirements.txt`.
 
 ```sh
 python3 -m venv .venv
@@ -13,11 +12,10 @@ python3 -m venv .venv
 .venv/bin/python -m pytest
 ```
 
-The tests can also run without installing dependencies. The interface tests are skipped when
-Streamlit and Pandas are absent; every other test runs on the standard library alone:
+The original greedy core tests can also run without installing dependencies:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -p 'test_core.py' -v
 ```
 
 ## Running the application
@@ -86,9 +84,69 @@ stale base version with `VersionConflict`, and writes the appointments and their
 `cancel` events in one transaction. Pending proposals stay in Streamlit session state and never
 reach the store, so discarding a proposal cannot modify committed state.
 
+## Optimization and repair
+
+The Streamlit Generate button currently uses the greedy baseline. The following engine APIs are
+ready for application integration; they do not modify the database or Streamlit state.
+
+```python
+from src.optimizer import optimize_schedule
+from src.repair import repair_schedule, with_resource_outage
+
+report = optimize_schedule(scenario, time_limit_seconds=5.0)
+if report.result is not None:
+    appointments = report.result.appointments
+
+# saved is a CommittedSchedule loaded from ScheduleStore.
+disrupted = with_resource_outage(scenario, resource_id, outage_interval)
+proposal = repair_schedule(disrupted, saved.appointments, saved.version,
+                          pinned=(), time_limit_seconds=5.0)
+if proposal.optimization.result is not None:
+    # Render proposal.changes for review before explicit confirmation.
+    repaired = proposal.optimization.result
+```
+
+`with_participant_availability` similarly replaces one participant's availability for a rescheduling
+request. Disruption helpers return new scenarios without mutating the original. A proposal carries
+`base_version` for the existing atomic `ScheduleStore.confirm` version check. The application must
+retain the disrupted scenario with the proposal, validate against that scenario before confirmation,
+and persist disruption inputs if it needs to restore them after a reload. Current SQLite storage
+persists schedules and audit history, but does not yet persist dynamic scenario changes.
+
+Pins are `(participant_id, visit_id)` keys referring to existing appointments and preserve their
+time and resources exactly. `existing` may include placements invalidated by new outages. A repair
+requires every existing appointment's `schedule_version` to equal the supplied base version.
+
+The optimizer maximizes scheduled visits, minimizes changes to existing placements (moves and
+cancellations, counting each existing visit once), then minimizes summed absolute target-date
+deviation in days. New appointments do not count as existing changes. Only proven objectives are
+fixed before proceeding. Constant objectives are proved directly without another solver search.
+
+`report.stages` exposes stage status, objective, bound, and runtime. `report.optimal` is true only
+when all three objectives are proven optimal. A valid fallback or previous-stage incumbent is retained
+on timeout, with status `FEASIBLE`. If pins make the model infeasible, status is `INFEASIBLE` and
+`result` is `None`; an unknown search with no validated incumbent also returns `None`. Disable
+confirmation whenever `result` is `None`. No protocol constraint or pin is silently relaxed.
+
+The five-second budget is shared across CP-SAT searches. Candidate enumeration, model construction,
+and fallback construction are outside that search budget and included in reported total runtime.
+Sorted inputs, a fixed scenario seed, and one worker improve repeatability; wall-clock limits do not
+guarantee identical results. Solver status meanings follow the
+[official OR-Tools documentation](https://developers.google.com/optimization/cp/cp_solver).
+
+## Evaluation
+
+```sh
+.venv/bin/python -m src.evaluate --time-limit 5 --output docs/evaluation.json
+```
+
+[Evaluation notes](docs/evaluation.md) summarize the committed machine-readable measurements and
+limitations. Tests additionally enumerate all assignments on tiny instances to verify the three
+objective priorities, and exercise outages, availability changes, cascading moves, pins, timeouts,
+and confirmation/version/persistence integration.
+
 ## Next milestones
 
-- CP-SAT optimization, repair relative to existing appointments, pinned appointments, and evaluation metrics, owned by the scheduling contributor.
 - Calendar views, disruption events, and repair comparison in the application.
 
 See [product design](docs/product.md) and [technical design](docs/technical.md).
