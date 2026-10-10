@@ -6,11 +6,13 @@ Python 3.11+, Streamlit, Pandas, OR-Tools CP-SAT, and pytest; local JSON/CSV and
 ## Modules
 - `app.py`: inputs, calendar/list views, disruption events, proposal comparisons, and confirmation.
 - `src/models.py`: data models and input validation.
+- `src/scenarios.py`: synthetic scenario specifications expanded into `Scenario` objects.
 - `src/windows.py`: visit windows calculated from reference dates.
 - `src/scheduler.py`: greedy baseline, CP-SAT scheduling, and repair.
 - `src/validator.py`: independent constraint checks without reusing solver constraint construction.
 - `src/storage.py`: SQLite state, schedule versions, and audit events.
-- `src/metrics.py`: evaluation and export. Place tests in `tests/` and synthetic scenarios in `data/`.
+- `src/export.py`: appointment and unscheduled-visit tables and CSV export.
+- `src/metrics.py`: evaluation. Place tests in `tests/` and synthetic scenarios in `data/`.
 
 ## Data Conventions
 - Study/VisitRule: rule version, reference-date type, target day offset, early/late tolerance, duration, resource requirements, and precedence.

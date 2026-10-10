@@ -1,0 +1,117 @@
+{
+  "id": "equipment_outage",
+  "order": 4,
+  "name": "Equipment outage",
+  "description": "The baseline scenario with one equipment unit withdrawn for the dosing weeks and the second unit unavailable for two clinic days.",
+  "seed": 23,
+  "start_date": "2026-10-12",
+  "days": 17,
+  "skip_weekends": true,
+  "clinic_open": "09:00",
+  "clinic_close": "17:00",
+  "rules": [
+    {
+      "id": "V1_screening",
+      "target_day": 0,
+      "early_days": 0,
+      "late_days": 2,
+      "duration_minutes": 60,
+      "requirements": {
+        "nurse": 1
+      }
+    },
+    {
+      "id": "V2_dosing",
+      "target_day": 4,
+      "early_days": 1,
+      "late_days": 2,
+      "duration_minutes": 60,
+      "requirements": {
+        "nurse": 1,
+        "equipment": 1
+      },
+      "predecessors": [
+        "V1_screening"
+      ]
+    },
+    {
+      "id": "V3_followup",
+      "target_day": 9,
+      "early_days": 2,
+      "late_days": 2,
+      "duration_minutes": 30,
+      "requirements": {
+        "nurse": 1
+      },
+      "predecessors": [
+        "V2_dosing"
+      ]
+    }
+  ],
+  "participants": {
+    "count": 30,
+    "id_prefix": "P",
+    "reference_spread_days": 5,
+    "availability": "mixed"
+  },
+  "resources": {
+    "nurse": {
+      "count": 5,
+      "id_prefix": "N"
+    },
+    "equipment": {
+      "count": 2,
+      "id_prefix": "E"
+    }
+  },
+  "outages": [
+    {
+      "resource_id": "E2",
+      "date": "2026-10-15",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E2",
+      "date": "2026-10-16",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E2",
+      "date": "2026-10-19",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E2",
+      "date": "2026-10-20",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E2",
+      "date": "2026-10-21",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E2",
+      "date": "2026-10-22",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E1",
+      "date": "2026-10-19",
+      "from": "09:00",
+      "to": "17:00"
+    },
+    {
+      "resource_id": "E1",
+      "date": "2026-10-20",
+      "from": "09:00",
+      "to": "17:00"
+    }
+  ]
+}

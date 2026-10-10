@@ -1,0 +1,68 @@
+{
+  "id": "small_feasible",
+  "order": 1,
+  "name": "Small feasible week",
+  "description": "Three participants with full-day availability, two nurses, and one equipment unit. Every protocol visit has a feasible slot.",
+  "seed": 11,
+  "start_date": "2026-10-12",
+  "days": 17,
+  "skip_weekends": true,
+  "clinic_open": "09:00",
+  "clinic_close": "17:00",
+  "rules": [
+    {
+      "id": "V1_screening",
+      "target_day": 0,
+      "early_days": 0,
+      "late_days": 2,
+      "duration_minutes": 60,
+      "requirements": {
+        "nurse": 1
+      }
+    },
+    {
+      "id": "V2_dosing",
+      "target_day": 4,
+      "early_days": 1,
+      "late_days": 2,
+      "duration_minutes": 60,
+      "requirements": {
+        "nurse": 1,
+        "equipment": 1
+      },
+      "predecessors": [
+        "V1_screening"
+      ]
+    },
+    {
+      "id": "V3_followup",
+      "target_day": 9,
+      "early_days": 2,
+      "late_days": 2,
+      "duration_minutes": 30,
+      "requirements": {
+        "nurse": 1
+      },
+      "predecessors": [
+        "V2_dosing"
+      ]
+    }
+  ],
+  "participants": {
+    "count": 3,
+    "id_prefix": "P",
+    "reference_spread_days": 3,
+    "availability": "wide"
+  },
+  "resources": {
+    "nurse": {
+      "count": 2,
+      "id_prefix": "N"
+    },
+    "equipment": {
+      "count": 1,
+      "id_prefix": "E"
+    }
+  },
+  "outages": []
+}

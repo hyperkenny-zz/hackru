@@ -1,0 +1,72 @@
+{
+  "id": "tight_capacity",
+  "order": 3,
+  "name": "Insufficient capacity",
+  "description": "The baseline participant population served by a single morning-shift nurse and a single equipment unit, so shared resources are heavily oversubscribed.",
+  "seed": 23,
+  "start_date": "2026-10-12",
+  "days": 17,
+  "skip_weekends": true,
+  "clinic_open": "09:00",
+  "clinic_close": "17:00",
+  "rules": [
+    {
+      "id": "V1_screening",
+      "target_day": 0,
+      "early_days": 0,
+      "late_days": 2,
+      "duration_minutes": 60,
+      "requirements": {
+        "nurse": 1
+      }
+    },
+    {
+      "id": "V2_dosing",
+      "target_day": 4,
+      "early_days": 1,
+      "late_days": 2,
+      "duration_minutes": 60,
+      "requirements": {
+        "nurse": 1,
+        "equipment": 1
+      },
+      "predecessors": [
+        "V1_screening"
+      ]
+    },
+    {
+      "id": "V3_followup",
+      "target_day": 9,
+      "early_days": 2,
+      "late_days": 2,
+      "duration_minutes": 30,
+      "requirements": {
+        "nurse": 1
+      },
+      "predecessors": [
+        "V2_dosing"
+      ]
+    }
+  ],
+  "participants": {
+    "count": 30,
+    "id_prefix": "P",
+    "reference_spread_days": 5,
+    "availability": "mixed"
+  },
+  "resources": {
+    "nurse": {
+      "count": 1,
+      "id_prefix": "N",
+      "shift": [
+        "09:00",
+        "13:00"
+      ]
+    },
+    "equipment": {
+      "count": 1,
+      "id_prefix": "E"
+    }
+  },
+  "outages": []
+}
