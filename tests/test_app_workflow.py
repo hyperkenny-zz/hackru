@@ -5,15 +5,16 @@ import os
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta, time as dt_time
 from pathlib import Path
-from src.export import (APPOINTMENT_COLUMNS, UNSCHEDULED_COLUMNS, appointment_rows, appointments_csv,
-                        unscheduled_csv, unscheduled_rows)
+from src.export import (APPOINTMENT_COLUMNS, CHANGE_COLUMNS, UNSCHEDULED_COLUMNS, appointment_rows,
+                        appointments_csv, change_rows, changes_csv, unscheduled_csv, unscheduled_rows)
 from src.scenarios import DATA_DIR, build_scenario, load_scenario, load_specs
 from src.scheduler import greedy_schedule
 from src.storage import ScheduleStore, VersionConflict, change_events, default_db_path
 from src.validator import validate_schedule
 
+DISRUPTIONS, REPAIR = "disruptions", "repair_proposal"
 HAS_STREAMLIT = importlib.util.find_spec("streamlit") is not None and importlib.util.find_spec("pandas") is not None
 
 
@@ -349,9 +350,135 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(store.current_version("small_feasible"), 1)
             self.assertEqual(len(store.load("small_feasible").appointments), 1)
 
+    def commit_initial_schedule(self):
+        """Generate and confirm the greedy baseline so a repair has a committed base."""
+        self.app.button(key="generate").click().run()
+        self.app.button(key="confirm").click().run()
+        self.assertFalse(self.app.exception)
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+
+    def add_nurse_outage(self, day=date(2026, 10, 12)):
+        self.app.selectbox(key="outage_resource").select("N1").run()
+        for key, value in (("outage_start_date", day), ("outage_end_date", day)):
+            self.app.date_input(key=key).set_value(value).run()
+        self.app.time_input(key="outage_start_time").set_value(dt_time(9)).run()
+        self.app.time_input(key="outage_end_time").set_value(dt_time(17)).run()
+        self.app.text_input(key="outage_reason").set_value("Nurse absence").run()
+        self.app.button(key="add_outage").click().run()
+        self.assertFalse(self.app.exception)
+
+    def button_keys(self):
+        return {button.key for button in self.app.button}
+
+    def test_an_outage_yields_a_repair_proposal_that_only_commits_on_confirmation(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        disruptions = self.app.session_state[DISRUPTIONS]
+        self.assertEqual(disruptions["scenario_id"], "small_feasible")
+        self.assertEqual(len(disruptions["records"]), 1)
+
+        self.app.button(key="repair").click().run()
+        self.assertFalse(self.app.exception)
+        metrics = self.metrics()
+        self.assertIn(metrics["Solver status"], ("OPTIMAL", "FEASIBLE"))
+        self.assertEqual(metrics["Scheduled after repair"], "9/9")
+        self.assertEqual(metrics["Repair validation"], "passed")
+        self.assertEqual(metrics["Committed schedule problems"], "1")
+        self.assertEqual((metrics["Added"], metrics["Moved"], metrics["Cancelled"]), ("0", "1", "0"))
+        changes = self.frames(CHANGE_COLUMNS)[0]
+        self.assertEqual(len(changes), 1)
+        row = changes.iloc[0]
+        self.assertEqual((row["participant_id"], row["visit_id"], row["change"]), ("P1", "V1_screening", "move"))
+        self.assertEqual(row["previous_resources"], "N1")
+        self.assertNotEqual((row["new_start"], row["new_resources"]), (row["previous_start"], "N1"))
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+
+        self.app.text_input(key="repair_note").set_value("nurse absence repair").run()
+        self.app.button(key="confirm_repair").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertNotIn(REPAIR, self.app.session_state)
+        with ScheduleStore() as store:
+            committed = store.load("small_feasible")
+            events = [event for event in store.history("small_feasible") if event.version == 2]
+        self.assertEqual((committed.version, committed.reason), (2, "nurse absence repair"))
+        self.assertEqual(len(committed.appointments), 9)
+        self.assertEqual([event.event_type for event in events], ["move"])
+        self.assertEqual(validate_schedule(load_scenario("small_feasible"), committed.appointments), [])
+
+    def test_discarding_a_repair_clears_its_inputs_and_leaves_the_database_unchanged(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        self.app.button(key="repair").click().run()
+        self.assertIn(REPAIR, self.app.session_state)
+        self.app.button(key="discard_repair").click().run()
+        self.assertNotIn(REPAIR, self.app.session_state)
+        self.assertNotIn(DISRUPTIONS, self.app.session_state)
+        self.assertTrue(any("unchanged" in info.value for info in self.app.info))
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+            self.assertEqual({event.event_type for event in store.history("small_feasible")}, {"add"})
+
+    def test_a_pinned_appointment_is_never_released_to_absorb_an_outage(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        self.app.multiselect(key="pins").set_value(["P1 / V1_screening"]).run()
+        self.app.button(key="repair").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(self.metrics()["Solver status"], "INFEASIBLE")
+        self.assertTrue(any("unpin" in warning.value for warning in self.app.warning))
+        self.assertNotIn("confirm_repair", self.button_keys())
+        self.assertFalse(self.frames(CHANGE_COLUMNS))
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+
+    def test_a_newer_committed_version_rejects_a_stale_repair_proposal(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        self.app.button(key="repair").click().run()
+        with ScheduleStore() as store:
+            store.confirm("small_feasible", 1, store.load("small_feasible").appointments[:4], "other session")
+        self.app.button(key="confirm_repair").click().run()
+        self.assertTrue(any("Generate the proposal again" in warning.value for warning in self.app.warning))
+        self.assertTrue(any("not the expected" in error.value for error in self.app.error))
+        self.assertIn(REPAIR, self.app.session_state)
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 2)
+            self.assertEqual(len(store.load("small_feasible").appointments), 4)
+
+    def test_changed_disruption_inputs_never_reuse_an_earlier_proposal(self):
+        self.commit_initial_schedule()
+        self.app.button(key="repair").click().run()
+        self.assertFalse(self.frames(CHANGE_COLUMNS))
+        self.assertTrue(any("changes nothing" in message.value for message in self.app.success))
+        self.add_nurse_outage()
+        self.assertNotIn(REPAIR, self.app.session_state)
+        self.app.button(key="repair").click().run()
+        changes = self.frames(CHANGE_COLUMNS)[0]
+        self.assertEqual(list(changes["change"]), ["move"])
+
+    def test_a_rescheduling_request_replaces_only_the_chosen_clinic_day(self):
+        self.commit_initial_schedule()
+        self.app.selectbox(key="request_participant").select("P1").run()
+        self.app.date_input(key="request_date").set_value(date(2026, 10, 12)).run()
+        self.app.checkbox(key="request_unavailable").set_value(True).run()
+        self.app.text_input(key="request_reason").set_value("Travel").run()
+        self.app.button(key="add_request").click().run()
+        self.assertFalse(self.app.exception)
+        self.app.button(key="repair").click().run()
+        self.assertFalse(self.app.exception)
+        metrics = self.metrics()
+        self.assertEqual(metrics["Scheduled after repair"], "9/9")
+        self.assertEqual(metrics["Repair validation"], "passed")
+        changes = self.frames(CHANGE_COLUMNS)[0]
+        self.assertEqual(list(changes["participant_id"]), ["P1"])
+        self.assertEqual(list(changes["visit_id"]), ["V1_screening"])
+        self.assertNotEqual(changes.iloc[0]["new_start"][:10], "2026-10-12")
+
     def test_switching_scenario_clears_the_proposal_and_shows_diagnostics(self):
         self.app.button(key="generate").click().run()
-        self.app.selectbox[0].select("tight_capacity").run()
+        self.app.selectbox(key="scenario").select("tight_capacity").run()
         self.assertTrue(any("Generate schedule" in info.value for info in self.app.info))
         self.app.button(key="generate").click().run()
         self.assertFalse(self.app.exception)

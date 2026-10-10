@@ -36,6 +36,18 @@ The CP-SAT budget applies to the solver searches only. Candidate enumeration and
 are outside it, so the reported total runtime can exceed the budget; the page reports measured
 runtime rather than promising a deadline.
 
+The repair tab records two kinds of disruption: a resource outage over an explicit interval, and a
+participant rescheduling request that replaces one clinic day's availability while keeping that
+participant's other days. Recorded inputs build a draft scenario; they stay in the session, and
+adding one discards any repair proposal generated from the earlier inputs. A repair starts from the
+committed schedule, optionally with pinned appointments that must keep their exact time and
+resources, and reports the solver status, how many validation problems the committed schedule has
+under the draft scenario, the added, moved, and cancelled counts, the change table, the visits left
+unscheduled, and the independent validator's verdict against the draft scenario. Pins are never
+released automatically: if they make the repair infeasible, the page says to adjust the disruption
+inputs or unpin those appointments. Confirmation uses the proposal's base version, so a schedule
+committed meanwhile is reported as a conflict instead of being overwritten.
+
 ## Application integration
 
 Construct immutable objects from `src.models`, then call:

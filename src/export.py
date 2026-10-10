@@ -10,6 +10,8 @@ APPOINTMENT_COLUMNS = ("participant_id", "visit_id", "date", "start", "end", "du
                        "days_from_target", "schedule_version")
 UNSCHEDULED_COLUMNS = ("participant_id", "visit_id", "reason", "candidate_count",
                        "window_earliest", "window_target", "window_latest")
+CHANGE_COLUMNS = ("participant_id", "visit_id", "change", "previous_start", "new_start",
+                  "previous_resources", "new_resources")
 
 
 def _index(scenario: Scenario):
@@ -50,6 +52,19 @@ def unscheduled_rows(scenario: Scenario, unscheduled: Iterable[UnscheduledVisit]
     return sorted(rows, key=lambda row: (row["participant_id"], row["visit_id"]))
 
 
+def change_rows(changes: Iterable[tuple[str, Appointment | None, Appointment | None]]) -> list[dict]:
+    """One row per repair change, ordered by participant and visit."""
+    def moment(appointment: Appointment | None) -> str:
+        return f"{appointment.interval.start:%Y-%m-%d %H:%M}" if appointment else ""
+
+    rows = [{"participant_id": (old or new).participant_id, "visit_id": (old or new).visit_id,
+             "change": event_type, "previous_start": moment(old), "new_start": moment(new),
+             "previous_resources": " ".join(old.resource_ids) if old else "",
+             "new_resources": " ".join(new.resource_ids) if new else ""}
+            for event_type, old, new in changes]
+    return sorted(rows, key=lambda row: (row["participant_id"], row["visit_id"]))
+
+
 def to_csv(rows: Sequence[dict], columns: Sequence[str]) -> str:
     """Render rows as CSV text with a fixed header and Unix line endings."""
     buffer = io.StringIO()
@@ -65,3 +80,7 @@ def appointments_csv(scenario: Scenario, appointments: Iterable[Appointment]) ->
 
 def unscheduled_csv(scenario: Scenario, unscheduled: Iterable[UnscheduledVisit]) -> str:
     return to_csv(unscheduled_rows(scenario, unscheduled), UNSCHEDULED_COLUMNS)
+
+
+def changes_csv(changes: Iterable[tuple[str, Appointment | None, Appointment | None]]) -> str:
+    return to_csv(change_rows(changes), CHANGE_COLUMNS)
