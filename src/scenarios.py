@@ -23,8 +23,9 @@ def _interval(day: date, start: time, end: time) -> Interval:
 def _clinic_days(spec: dict) -> tuple[date, ...]:
     """Calendar days inside the horizon, excluding weekends unless requested."""
     start = date.fromisoformat(spec["start_date"])
-    days = tuple(day for offset in range(int(spec["days"]))
-                 if not (spec.get("skip_weekends", True) and (day := start + timedelta(days=offset)).weekday() >= 5))
+    skip_weekends = spec.get("skip_weekends", True)
+    horizon = (start + timedelta(days=offset) for offset in range(int(spec["days"])))
+    days = tuple(day for day in horizon if not (skip_weekends and day.weekday() >= 5))
     if not days:
         raise ValueError("Scenario horizon contains no clinic days")
     return days

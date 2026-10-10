@@ -53,6 +53,16 @@ class ScenarioTests(unittest.TestCase):
         outage_dates = {i.start.date().isoformat() for r in load_scenario("equipment_outage").resources for i in r.outages}
         self.assertEqual(outage_dates, {entry["date"] for entry in spec("equipment_outage")["outages"]})
 
+    def test_weekend_days_are_kept_when_requested(self):
+        weekdays_only, every_day = (build_scenario(spec() | {"skip_weekends": value}) for value in (True, False))
+        self.assertEqual(len(every_day.clinic_hours), spec()["days"])
+        self.assertGreater(len(every_day.clinic_hours), len(weekdays_only.clinic_hours))
+        self.assertEqual({i.start.weekday() for i in every_day.clinic_hours}, set(range(7)))
+        self.assertTrue(all(i.start.weekday() < 5 for i in weekdays_only.clinic_hours))
+        with self.assertRaises(ValueError) as caught:
+            build_scenario(spec() | {"skip_weekends": True, "start_date": "2026-10-17", "days": 2})
+        self.assertIn("no clinic days", str(caught.exception))
+
     def test_specifications_reject_authoring_mistakes(self):
         for change, message in ((lambda s: s | {"days": 3}, "Horizon misses"),
                                 (lambda s: s | {"clinic_open": "17:00"}, "must close after"),
