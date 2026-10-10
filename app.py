@@ -424,6 +424,11 @@ with repair_tab:
                       for a in sorted(committed.appointments, key=lambda a: a.key)}
         pins = st.multiselect("Pinned appointments that must keep their time and resources",
                               list(pin_labels), key="pins")
+        current_pins = tuple(sorted(pin_labels[label] for label in pins))
+        if repair is not None and set(repair["pinned"]) != set(current_pins):
+            st.session_state.pop(REPAIR, None)
+            repair = None
+            st.info("Pinned appointments changed. Generate a new repair proposal before confirming.")
         prior_errors = validate_schedule(draft_scenario, committed.appointments)
         st.caption(f"Committed version {committed.version} with {len(committed.appointments)} "
                    f"appointments. Under the draft scenario the committed schedule has "
@@ -434,14 +439,14 @@ with repair_tab:
                     generated = repair_schedule(scenario=draft_scenario,
                                                 existing=committed.appointments,
                                                 base_version=committed.version,
-                                                pinned=tuple(pin_labels[label] for label in pins),
+                                                pinned=current_pins,
                                                 time_limit_seconds=float(budget))
             except ValueError as error:
                 st.error(f"The repair inputs are not valid: {error}")
             else:
                 st.session_state[REPAIR] = {
                     "scenario_id": scenario_id, "scenario": draft_scenario, "proposal": generated,
-                    "records": records, "pinned": tuple(pin_labels[label] for label in pins),
+                    "records": records, "pinned": current_pins,
                     "prior_errors": len(prior_errors), "generated_at": datetime.now().astimezone()}
                 st.rerun()
 
@@ -506,6 +511,12 @@ with repair_tab:
             repair_note = st.text_input("Repair note", key="repair_note",
                                         placeholder="Why this repair is being committed")
             if st.button("Confirm repair", type="primary", disabled=bool(errors), key="confirm_repair"):
+                # Recheck current widget state at the write boundary.
+                selected_pins = {pin_labels.get(label) for label in st.session_state.get("pins", ())}
+                if selected_pins != set(repair["pinned"]):
+                    st.session_state.pop(REPAIR, None)
+                    flash("Pinned appointments changed. Generate a new repair proposal before confirming.", "info")
+                    st.rerun()
                 try:
                     with ScheduleStore() as store:
                         saved = store.confirm(scenario_id, repair["proposal"].base_version,

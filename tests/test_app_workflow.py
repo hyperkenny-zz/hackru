@@ -538,6 +538,46 @@ class ApplicationTests(unittest.TestCase):
         with ScheduleStore() as store:
             self.assertEqual(store.current_version("small_feasible"), 1)
 
+    def test_changing_pins_invalidates_an_existing_repair_before_confirmation(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        self.app.button(key="repair").click().run()
+        self.assertIn(REPAIR, self.app.session_state)
+        self.assertIn("confirm_repair", self.button_keys())
+
+        self.app.multiselect(key="pins").set_value(["P1 / V1_screening"]).run()
+        self.assertFalse(self.app.exception)
+        self.assertNotIn(REPAIR, self.app.session_state)
+        self.assertNotIn("confirm_repair", self.button_keys())
+        self.assertIn(DISRUPTIONS, self.app.session_state)
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+
+        self.app.button(key="repair").click().run()
+        self.assertEqual(self.metrics()["Solver status"], "INFEASIBLE")
+        self.assertNotIn("confirm_repair", self.button_keys())
+
+        self.app.multiselect(key="pins").set_value([]).run()
+        self.assertNotIn(REPAIR, self.app.session_state)
+        self.app.button(key="repair").click().run()
+        self.assertIn("confirm_repair", self.button_keys())
+        self.app.button(key="confirm_repair").click().run()
+        self.assertFalse(self.app.exception)
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 2)
+
+    def test_pin_change_and_confirm_in_one_run_cannot_write_the_old_repair(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        self.app.button(key="repair").click().run()
+        self.app.multiselect(key="pins").set_value(["P1 / V1_screening"])
+        self.app.button(key="confirm_repair").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertNotIn(REPAIR, self.app.session_state)
+        self.assertNotIn("confirm_repair", self.button_keys())
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+
     def test_a_newer_committed_version_rejects_a_stale_repair_proposal(self):
         self.commit_initial_schedule()
         self.add_nurse_outage()
