@@ -4,7 +4,9 @@ SQLite is the only source of committed state. Pending proposals live in the
 application's session state and never reach this module, so discarding a
 proposal cannot modify the database. :meth:`ScheduleStore.confirm` allocates the
 next version for a scenario, rejects a stale base version, and writes the
-schedule together with its change events in one transaction.
+schedule, its change events, and the scenario it was validated against in one
+transaction. Versions written before snapshots existed have none, and the
+application falls back to the built-in specification for those.
 """
 import json
 import os
@@ -12,7 +14,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from src.models import CLINIC_TZ, Appointment, Interval
+from src.models import CLINIC_TZ, Appointment, Interval, Scenario
+from src.snapshot import dumps, loads
 
 REPO_DB_PATH = Path(__file__).resolve().parent.parent / "scheduler.sqlite3"
 DB_PATH_VARIABLE = "SCHEDULER_DB_PATH"
@@ -33,6 +36,13 @@ CREATE TABLE IF NOT EXISTS appointments (
     end TEXT NOT NULL,
     resource_ids TEXT NOT NULL,
     PRIMARY KEY (scenario_id, version, participant_id, visit_id),
+    FOREIGN KEY (scenario_id, version) REFERENCES schedule_versions (scenario_id, version)
+);
+CREATE TABLE IF NOT EXISTS scenario_snapshots (
+    scenario_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (scenario_id, version),
     FOREIGN KEY (scenario_id, version) REFERENCES schedule_versions (scenario_id, version)
 );
 CREATE TABLE IF NOT EXISTS change_events (
@@ -71,6 +81,7 @@ class CommittedSchedule:
     appointments: tuple[Appointment, ...]
     confirmed_at: datetime | None = None
     reason: str = ""
+    scenario: Scenario | None = None
 
 
 @dataclass(frozen=True)
@@ -162,14 +173,34 @@ class ScheduleStore:
         appointments = tuple(_appointment(row["participant_id"], row["visit_id"], row["start"], row["end"],
                                           json.loads(row["resource_ids"]), version) for row in rows)
         return CommittedSchedule(scenario_id, version, appointments,
-                                 datetime.fromisoformat(header["confirmed_at"]), header["reason"])
+                                 datetime.fromisoformat(header["confirmed_at"]), header["reason"],
+                                 self.snapshot(scenario_id, version))
+
+    def snapshot(self, scenario_id: str, version: int) -> Scenario | None:
+        """The scenario a version was confirmed against, or None for an older version."""
+        row = self._connection.execute(
+            "SELECT payload FROM scenario_snapshots WHERE scenario_id = ? AND version = ?",
+            (scenario_id, version)).fetchone()
+        if row is None:
+            return None
+        try:
+            return loads(row["payload"])
+        except ValueError as error:
+            raise ValueError(f"Scenario snapshot for {scenario_id} version {version} "
+                             f"cannot be restored: {error}") from error
 
     def confirm(self, scenario_id: str, base_version: int, appointments: tuple[Appointment, ...],
-                reason: str = "") -> CommittedSchedule:
-        """Save a proposal as the next version, atomically, if the base version still holds."""
+                reason: str = "", scenario: Scenario | None = None) -> CommittedSchedule:
+        """Save a proposal as the next version, atomically, if the base version still holds.
+
+        A scenario is stored alongside the schedule so dynamic changes such as
+        outages survive a reload. Encoding happens before the transaction opens,
+        so an unencodable scenario cannot leave a half-written version behind.
+        """
         keys = [a.key for a in appointments]
         if len(keys) != len(set(keys)):
             raise ValueError("Proposal contains duplicate participant/visit appointments")
+        payload = None if scenario is None else dumps(scenario)
         confirmed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         connection = self._connection
         connection.execute("BEGIN IMMEDIATE")
@@ -183,6 +214,9 @@ class ScheduleStore:
                            for a in appointments)
             connection.execute("INSERT INTO schedule_versions (scenario_id, version, confirmed_at, reason)"
                                " VALUES (?, ?, ?, ?)", (scenario_id, version, confirmed_at, reason))
+            if payload is not None:
+                connection.execute("INSERT INTO scenario_snapshots (scenario_id, version, payload)"
+                                   " VALUES (?, ?, ?)", (scenario_id, version, payload))
             connection.executemany(
                 "INSERT INTO appointments (scenario_id, version, participant_id, visit_id, start, end, resource_ids)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -199,7 +233,8 @@ class ScheduleStore:
         except BaseException:
             connection.execute("ROLLBACK")
             raise
-        return CommittedSchedule(scenario_id, version, stored, datetime.fromisoformat(confirmed_at), reason)
+        return CommittedSchedule(scenario_id, version, stored, datetime.fromisoformat(confirmed_at),
+                                 reason, scenario)
 
     def versions(self, scenario_id: str) -> tuple[CommittedSchedule, ...]:
         """Version headers, newest first, without loading their appointments."""

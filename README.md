@@ -95,12 +95,26 @@ scenario = load_scenario("baseline_30")
 
 ## Committed state and versions
 
-`src.storage.ScheduleStore` keeps committed schedules, per-scenario version numbers, and the change
-history in SQLite at `scheduler.sqlite3`, overridable with the `SCHEDULER_DB_PATH` environment
-variable. Version zero means nothing is committed. `confirm` allocates the next version, rejects a
-stale base version with `VersionConflict`, and writes the appointments and their `add`, `move`, and
-`cancel` events in one transaction. Pending proposals stay in Streamlit session state and never
-reach the store, so discarding a proposal cannot modify committed state.
+`src.storage.ScheduleStore` keeps committed schedules, per-scenario version numbers, the change
+history, and one scenario snapshot per version in SQLite at `scheduler.sqlite3`, overridable with
+the `SCHEDULER_DB_PATH` environment variable. Version zero means nothing is committed. `confirm`
+allocates the next version, rejects a stale base version with `VersionConflict`, and writes the
+appointments, their `add`, `move`, and `cancel` events, and the snapshot in one transaction. Pending
+proposals stay in Streamlit session state and never reach the store, so discarding a proposal cannot
+modify committed state.
+
+```python
+saved = store.confirm(scenario_id, base_version, appointments, note, scenario)
+restored = store.load(scenario_id)       # restored.scenario is the snapshot, or None
+```
+
+`src.snapshot` encodes every scheduler input, so a confirmed outage or availability change is
+restored with its version instead of being rediscovered from the built-in specification. The
+encoding is explicit and declares its format, so an unreadable snapshot raises rather than
+silently losing inputs; the application then refuses to confirm anything for that scenario. A
+version committed before snapshots existed has none, and the application falls back to the built-in
+specification for it. Passing no scenario to `confirm` stores no snapshot, which keeps the earlier
+call signature working.
 
 ## Optimization and repair
 
@@ -126,10 +140,9 @@ if proposal.optimization.result is not None:
 
 `with_participant_availability` similarly replaces one participant's availability for a rescheduling
 request. Disruption helpers return new scenarios without mutating the original. A proposal carries
-`base_version` for the existing atomic `ScheduleStore.confirm` version check. The application must
-retain the disrupted scenario with the proposal, validate against that scenario before confirmation,
-and persist disruption inputs if it needs to restore them after a reload. Current SQLite storage
-persists schedules and audit history, but does not yet persist dynamic scenario changes.
+`base_version` for the existing atomic `ScheduleStore.confirm` version check. The application
+retains the disrupted scenario with the proposal, validates against that scenario before
+confirmation, and stores it as the version's snapshot, so the disruption inputs survive a reload.
 
 Pins are `(participant_id, visit_id)` keys referring to existing appointments and preserve their
 time and resources exactly. `existing` may include placements invalidated by new outages. A repair

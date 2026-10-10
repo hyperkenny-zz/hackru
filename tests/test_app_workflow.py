@@ -2,16 +2,20 @@
 import importlib.util
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import date, timedelta, time as dt_time
+from datetime import date, datetime, timedelta, time as dt_time
 from pathlib import Path
+from src.models import CLINIC_TZ, Interval
 from src.export import (APPOINTMENT_COLUMNS, CHANGE_COLUMNS, UNSCHEDULED_COLUMNS, appointment_rows,
                         appointments_csv, change_rows, changes_csv, unscheduled_csv, unscheduled_rows)
+from src.repair import with_participant_availability, with_resource_outage
 from src.scenarios import DATA_DIR, build_scenario, load_scenario, load_specs
 from src.scheduler import greedy_schedule
-from src.storage import ScheduleStore, VersionConflict, change_events, default_db_path
+from src.snapshot import SNAPSHOT_FORMAT, decode_scenario, dumps, encode_scenario, loads
+from src.storage import SCHEMA, ScheduleStore, VersionConflict, change_events, default_db_path
 from src.validator import validate_schedule
 
 DISRUPTIONS, REPAIR = "disruptions", "repair_proposal"
@@ -20,6 +24,11 @@ HAS_STREAMLIT = importlib.util.find_spec("streamlit") is not None and importlib.
 
 def spec(id="small_feasible"):
     return load_specs()[id]
+
+
+def interval(start=9, end=17, day="2026-10-12") -> Interval:
+    return Interval(datetime.fromisoformat(f"{day}T{start:02}:00:00").replace(tzinfo=CLINIC_TZ),
+                    datetime.fromisoformat(f"{day}T{end:02}:00:00").replace(tzinfo=CLINIC_TZ))
 
 
 class ScenarioTests(unittest.TestCase):
@@ -104,6 +113,41 @@ class ScenarioTests(unittest.TestCase):
     def test_data_directory_is_the_repository_folder(self):
         self.assertEqual(DATA_DIR.name, "data")
         self.assertTrue(sorted(DATA_DIR.glob("*.json")))
+
+
+class SnapshotTests(unittest.TestCase):
+    def outage_scenario(self):
+        return with_resource_outage(load_scenario("small_feasible"), "N1", interval(9, 17))
+
+    def test_every_scenario_survives_a_round_trip(self):
+        for id in load_specs():
+            with self.subTest(scenario=id):
+                scenario = load_scenario(id)
+                self.assertEqual(loads(dumps(scenario)), scenario)
+
+    def test_outages_and_availability_changes_survive_a_round_trip(self):
+        scenario = self.outage_scenario()
+        availability = (interval(9, 11, "2026-10-13"),)
+        scenario = with_participant_availability(scenario, "P1", availability)
+        restored = loads(dumps(scenario))
+        self.assertEqual(restored, scenario)
+        self.assertEqual(next(r for r in restored.resources if r.id == "N1").outages, (interval(9, 17),))
+        self.assertEqual(next(p for p in restored.participants if p.id == "P1").availability, availability)
+
+    def test_encoding_is_stable_and_declares_its_format(self):
+        scenario = self.outage_scenario()
+        self.assertEqual(encode_scenario(scenario)["format"], SNAPSHOT_FORMAT)
+        self.assertEqual(dumps(scenario), dumps(loads(dumps(scenario))))
+
+    def test_unreadable_snapshots_are_rejected(self):
+        payload = encode_scenario(load_scenario("small_feasible"))
+        for broken, message in ((payload | {"format": 99}, "Unsupported scenario snapshot format"),
+                                ({key: value for key, value in payload.items() if key != "rules"}, "Malformed")):
+            with self.subTest(message=message), self.assertRaises(ValueError) as caught:
+                decode_scenario(broken)
+            self.assertIn(message, str(caught.exception))
+        with self.assertRaises(ValueError):
+            loads("{not json")
 
 
 class ExportTests(unittest.TestCase):
@@ -231,6 +275,58 @@ class StorageTests(unittest.TestCase):
         stamped = replace(self.appointments[0], schedule_version=7)
         self.assertEqual(change_events((self.appointments[0],), (stamped,)), ())
 
+    def test_confirmation_stores_the_scenario_it_was_validated_against(self):
+        disrupted = with_resource_outage(self.scenario, "N1", interval(9, 17))
+        self.store.confirm("small_feasible", 0, self.appointments, "initial", self.scenario)
+        repaired = greedy_schedule(disrupted).appointments
+        self.store.confirm("small_feasible", 1, repaired, "outage repair", disrupted)
+        self.store.close()
+        with ScheduleStore(self.path) as reopened:
+            first, second = (reopened.load("small_feasible", version) for version in (1, 2))
+            self.assertEqual(first.scenario, self.scenario)
+            self.assertEqual(second.scenario, disrupted)
+            self.assertEqual(reopened.load("small_feasible").scenario, disrupted)
+            self.assertEqual(sum(len(r.outages) for r in second.scenario.resources), 1)
+            self.assertEqual(validate_schedule(second.scenario, second.appointments), [])
+
+    def test_a_version_without_a_snapshot_reports_none(self):
+        self.store.confirm("small_feasible", 0, self.appointments, "no snapshot")
+        loaded = self.store.load("small_feasible")
+        self.assertIsNone(loaded.scenario)
+        self.assertIsNone(self.store.snapshot("small_feasible", 1))
+        self.assertEqual(len(loaded.appointments), len(self.appointments))
+
+    def test_a_database_written_before_snapshots_still_opens(self):
+        self.store.close()
+        self.path.unlink()
+        legacy = sqlite3.connect(self.path)
+        with legacy:
+            for statement in SCHEMA.split(";"):
+                if "scenario_snapshots" not in statement and statement.strip():
+                    legacy.execute(statement)
+            legacy.execute("INSERT INTO schedule_versions (scenario_id, version, confirmed_at, reason)"
+                           " VALUES ('small_feasible', 1, '2026-01-01T00:00:00+00:00', 'legacy')")
+            legacy.executemany(
+                "INSERT INTO appointments (scenario_id, version, participant_id, visit_id, start, end,"
+                " resource_ids) VALUES ('small_feasible', 1, ?, ?, ?, ?, ?)",
+                [(a.participant_id, a.visit_id, a.interval.start.isoformat(), a.interval.end.isoformat(),
+                  json.dumps(list(a.resource_ids))) for a in self.appointments])
+        legacy.close()
+        with ScheduleStore(self.path) as migrated:
+            loaded = migrated.load("small_feasible")
+            self.assertEqual((loaded.version, loaded.reason), (1, "legacy"))
+            self.assertIsNone(loaded.scenario)
+            self.assertEqual(len(loaded.appointments), len(self.appointments))
+            saved = migrated.confirm("small_feasible", 1, loaded.appointments, "first snapshot", self.scenario)
+            self.assertEqual(saved.version, 2)
+            self.assertEqual(migrated.load("small_feasible").scenario, self.scenario)
+
+    def test_an_unencodable_scenario_writes_no_version(self):
+        with self.assertRaises(AttributeError):
+            self.store.confirm("small_feasible", 0, self.appointments, "broken", object())
+        self.assertEqual(self.store.current_version("small_feasible"), 0)
+        self.assertEqual(self.store.versions("small_feasible"), ())
+
     def test_unknown_version_is_reported(self):
         with self.assertRaises(KeyError):
             self.store.load("small_feasible", 3)
@@ -257,9 +353,18 @@ class ApplicationTests(unittest.TestCase):
                         else os.environ.update({"SCHEDULER_DB_PATH": original}))
         self.app = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=120).run()
 
-    def frames(self, columns):
+    RESOURCE_COLUMNS = ("resource_id", "kind", "working_days", "daily_shift", "outage_days", "outage_dates")
+
+    def frames(self, columns, app=None):
         """Rendered tables whose columns match an export schema."""
-        return [frame.value for frame in self.app.dataframe if list(frame.value.columns) == list(columns)]
+        return [frame.value for frame in (app or self.app).dataframe
+                if list(frame.value.columns) == list(columns)]
+
+    def reopen(self):
+        """A fresh session against the same database, as if the page were reloaded."""
+        from streamlit.testing.v1 import AppTest
+        return AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"),
+                                 default_timeout=120).run()
 
     def download_labels(self):
         return [button.label for button in self.app.download_button]
@@ -475,6 +580,33 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(list(changes["participant_id"]), ["P1"])
         self.assertEqual(list(changes["visit_id"]), ["V1_screening"])
         self.assertNotEqual(changes.iloc[0]["new_start"][:10], "2026-10-12")
+
+    def test_a_confirmed_repair_and_its_outage_survive_reopening_the_app(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        self.app.button(key="repair").click().run()
+        self.app.button(key="confirm_repair").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertNotIn(DISRUPTIONS, self.app.session_state)
+        self.assertTrue(any("part of the committed scenario" in m.value for m in self.app.success))
+
+        reopened = self.reopen()
+        self.assertFalse(reopened.exception)
+        self.assertNotIn(DISRUPTIONS, reopened.session_state)
+        self.assertTrue(any("restored from committed version 2" in caption.value
+                            for caption in reopened.caption))
+        resources = self.frames(self.RESOURCE_COLUMNS, reopened)[0]
+        nurse = resources[resources["resource_id"] == "N1"].iloc[0]
+        self.assertEqual(nurse["outage_days"], 1)
+        self.assertEqual(nurse["outage_dates"], "2026-10-12")
+        appointments = self.frames(APPOINTMENT_COLUMNS, reopened)[0]
+        self.assertEqual(len(appointments), 9)
+        self.assertEqual(set(appointments["schedule_version"]), {2})
+        with ScheduleStore() as store:
+            committed = store.load("small_feasible")
+        self.assertEqual(committed.version, 2)
+        self.assertEqual(validate_schedule(committed.scenario, committed.appointments), [])
+        self.assertEqual(sum(len(r.outages) for r in committed.scenario.resources), 1)
 
     def test_switching_scenario_clears_the_proposal_and_shows_diagnostics(self):
         self.app.button(key="generate").click().run()

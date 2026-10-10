@@ -196,16 +196,29 @@ with st.sidebar:
                              "and model construction.")
 
 try:
-    scenario = cached_scenario(scenario_id)
+    builtin_scenario = cached_scenario(scenario_id)
 except (ValueError, KeyError) as error:
     st.error(f"Scenario {scenario_id} is invalid: {error}")
     st.stop()
 
+snapshot_error = None
 with ScheduleStore() as store:
-    committed = store.load(scenario_id)
+    try:
+        committed = store.load(scenario_id)
+    except ValueError as error:
+        snapshot_error, committed = error, store.load(scenario_id, 0)
     version_headers = store.versions(scenario_id)
     version_counts = store.appointment_counts(scenario_id)
     events = store.history(scenario_id, limit=500)
+if snapshot_error is not None:
+    st.error(f"{snapshot_error}. The built-in specification is shown instead, and nothing can be "
+             "confirmed until the stored snapshot is readable.")
+    st.stop()
+
+# A confirmed version owns the scenario it was validated against, including any
+# outage or availability change already accepted; older versions have no snapshot.
+base_scenario = committed.scenario or builtin_scenario
+restored = committed.scenario is not None
 
 proposal = st.session_state.get(PROPOSAL)
 if proposal and proposal["scenario_id"] != scenario_id:
@@ -215,19 +228,19 @@ if repair and repair["scenario_id"] != scenario_id:
     repair = None
 records = disruption_records(scenario_id)
 try:
-    draft_scenario = apply_disruptions(scenario, records)
+    draft_scenario = apply_disruptions(base_scenario, records)
 except ValueError as error:
     st.error(f"The disruption inputs held in this session no longer apply: {error}")
-    draft_scenario, records = scenario, ()
+    draft_scenario, records = base_scenario, ()
     st.session_state.pop(DISRUPTIONS, None)
 
 with st.sidebar:
     st.header("Workflow")
     if st.button("Generate schedule", type="primary", width="stretch", key="generate"):
         with st.spinner(f"Generating a schedule with the {ENGINES[engine].lower()}..."):
-            result, report, runtime = solve(engine, scenario, float(budget))
+            result, report, runtime = solve(engine, base_scenario, float(budget))
         st.session_state[PROPOSAL] = {"scenario_id": scenario_id, "engine": engine,
-                                      "base_version": committed.version, "scenario": scenario,
+                                      "base_version": committed.version, "scenario": base_scenario,
                                       "generated_at": datetime.now().astimezone(), "result": result,
                                       "report": report, "runtime": runtime,
                                       "status": report.status if report else result.status}
@@ -249,12 +262,12 @@ if FLASH in st.session_state:
     kind, message = st.session_state.pop(FLASH)
     getattr(st, kind)(message)
 
-visits = len(scenario.participants) * len(scenario.rules)
+visits = len(base_scenario.participants) * len(base_scenario.rules)
 columns = st.columns(5)
-for column, (label, value) in zip(columns, (("Participants", len(scenario.participants)),
-                                            ("Visit rules", len(scenario.rules)),
-                                            ("Resources", len(scenario.resources)),
-                                            ("Clinic days", len(scenario.clinic_hours)),
+for column, (label, value) in zip(columns, (("Participants", len(base_scenario.participants)),
+                                            ("Visit rules", len(base_scenario.rules)),
+                                            ("Resources", len(base_scenario.resources)),
+                                            ("Clinic days", len(base_scenario.clinic_hours)),
                                             ("Protocol visits", visits))):
     column.metric(label, value)
 
@@ -262,14 +275,20 @@ inputs_tab, schedule_tab, repair_tab, history_tab = st.tabs(["Inputs", "Schedule
 
 with inputs_tab:
     st.subheader("Visit rules")
-    st.dataframe(rule_frame(scenario), width="stretch", hide_index=True)
+    st.dataframe(rule_frame(base_scenario), width="stretch", hide_index=True)
     left, right = st.columns(2)
     with left:
         st.subheader("Participants")
-        st.dataframe(participant_frame(scenario), width="stretch", hide_index=True)
+        st.dataframe(participant_frame(base_scenario), width="stretch", hide_index=True)
     with right:
         st.subheader("Resources")
-        st.dataframe(resource_frame(scenario), width="stretch", hide_index=True)
+        st.dataframe(resource_frame(base_scenario), width="stretch", hide_index=True)
+    st.caption(f"Scenario restored from committed version {committed.version}, including every "
+               "confirmed outage and availability change."
+               if restored else
+               "Built-in specification from data/. A confirmed version stores the scenario it was "
+               "validated against, and this page then shows that scenario instead."
+               )
     st.caption("Reference dates anchor every visit window. Availability blocks and working hours are "
                "half-open intervals inside a single clinic day.")
 
@@ -319,7 +338,8 @@ with schedule_tab:
             if st.button("Confirm proposal", type="primary", disabled=bool(errors), key="confirm"):
                 try:
                     with ScheduleStore() as store:
-                        saved = store.confirm(scenario_id, proposal["base_version"], result.appointments, note)
+                        saved = store.confirm(scenario_id, proposal["base_version"],
+                                              result.appointments, note, proposal["scenario"])
                 except VersionConflict as error:
                     st.error(f"{error}. Generate the proposal again from the current version.")
                 else:
@@ -334,7 +354,7 @@ with schedule_tab:
     else:
         st.caption(f"Version {committed.version} confirmed {local(committed.confirmed_at):%Y-%m-%d %H:%M %Z}"
                    + (f" · {committed.reason}" if committed.reason else ""))
-        committed_rows = appointment_rows(scenario, committed.appointments)
+        committed_rows = appointment_rows(base_scenario, committed.appointments)
         st.dataframe(frame(committed_rows, APPOINTMENT_COLUMNS), width="stretch", hide_index=True)
         download("Download committed CSV", to_csv(committed_rows, APPOINTMENT_COLUMNS),
                  f"{scenario_id}_committed_v{committed.version}.csv", "committed_csv")
@@ -342,9 +362,10 @@ with schedule_tab:
 with repair_tab:
     st.subheader("Disruption inputs")
     st.caption("Disruption inputs build a draft scenario for review. They are held in this session "
-               "only and never reach the database until a repair proposal is confirmed.")
-    kinds = {r.id: r.kind for r in scenario.resources}
-    clinic_days = sorted({i.start.date() for i in scenario.clinic_hours})
+               "only until a repair proposal is confirmed, and confirming stores the draft scenario "
+               "with that version, so accepted outages and availability changes survive a reload.")
+    kinds = {r.id: r.kind for r in base_scenario.resources}
+    clinic_days = sorted({i.start.date() for i in base_scenario.clinic_hours})
     outage_column, availability_column = st.columns(2)
     with outage_column:
         st.markdown("**Resource outage**")
@@ -360,13 +381,13 @@ with repair_tab:
                       "start": datetime.combine(outage_start_date, outage_start_time, CLINIC_TZ),
                       "end": datetime.combine(outage_end_date, outage_end_time, CLINIC_TZ),
                       "reason": outage_reason}
-            if store_disruption(scenario_id, scenario, record):
+            if store_disruption(scenario_id, base_scenario, record):
                 st.session_state.pop(REPAIR, None)
                 flash(f"Outage recorded for {outage_resource}.", "info")
                 st.rerun()
     with availability_column:
         st.markdown("**Participant rescheduling request**")
-        request_participant = st.selectbox("Participant", [p.id for p in scenario.participants],
+        request_participant = st.selectbox("Participant", [p.id for p in base_scenario.participants],
                                            key="request_participant")
         request_date = st.date_input("Clinic day", value=clinic_days[0], key="request_date")
         request_unavailable = st.checkbox("Unavailable all day", key="request_unavailable")
@@ -382,7 +403,7 @@ with repair_tab:
                       "date": request_date, "reason": request_reason,
                       "start": None if request_unavailable else request_start_time,
                       "end": None if request_unavailable else request_end_time}
-            if store_disruption(scenario_id, scenario, record):
+            if store_disruption(scenario_id, base_scenario, record):
                 st.session_state.pop(REPAIR, None)
                 flash(f"Availability change recorded for {request_participant}.", "info")
                 st.rerun()
@@ -488,14 +509,15 @@ with repair_tab:
                 try:
                     with ScheduleStore() as store:
                         saved = store.confirm(scenario_id, repair["proposal"].base_version,
-                                              repaired.appointments, repair_note)
+                                              repaired.appointments, repair_note, repair["scenario"])
                 except VersionConflict as error:
                     st.error(f"{error}. Generate the repair proposal again from the current version.")
                 else:
                     del st.session_state[REPAIR]
+                    st.session_state.pop(DISRUPTIONS, None)
                     flash(f"Committed version {saved.version} with {len(saved.appointments)} "
-                          "appointments. The disruption inputs stay in this session only; they are "
-                          "not persisted with the version yet.")
+                          "appointments. Its disruption inputs are now part of the committed "
+                          "scenario.")
                     st.rerun()
 
 with history_tab:

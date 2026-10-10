@@ -10,7 +10,8 @@ Python 3.11+, Streamlit, Pandas, OR-Tools CP-SAT, and pytest; local JSON/CSV and
 - `src/windows.py`: visit windows calculated from reference dates.
 - `src/scheduler.py`: greedy baseline, CP-SAT scheduling, and repair.
 - `src/validator.py`: independent constraint checks without reusing solver constraint construction.
-- `src/storage.py`: SQLite state, schedule versions, and audit events.
+- `src/storage.py`: SQLite state, schedule versions, scenario snapshots, and audit events.
+- `src/snapshot.py`: JSON encoding of scenarios for version snapshots.
 - `src/export.py`: appointment and unscheduled-visit tables and CSV export.
 - `src/metrics.py`: evaluation. Place tests in `tests/` and synthetic scenarios in `data/`.
 
