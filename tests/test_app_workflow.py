@@ -298,6 +298,37 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(len(events), 9)
         self.assertEqual({event.event_type for event in events}, {"add"})
 
+    def metrics(self):
+        return {metric.label: metric.value for metric in self.app.metric}
+
+    def test_the_optimizer_engine_generates_and_confirms_a_proven_schedule(self):
+        self.app.radio(key="engine").set_value("cpsat").run()
+        self.app.button(key="generate").click().run()
+        self.assertFalse(self.app.exception)
+        metrics = self.metrics()
+        self.assertEqual(metrics["Solver status"], "OPTIMAL")
+        self.assertEqual(metrics["Proven optimal"], "yes")
+        self.assertEqual(metrics["Independent validation"], "passed")
+        self.assertEqual(metrics["Scheduled"], "9/9")
+        stages = self.frames(("stage", "status", "runtime_seconds", "objective", "best_bound"))[0]
+        self.assertEqual(list(stages["stage"]), ["scheduled_count", "existing_changes", "target_deviation"])
+        self.assertEqual(set(stages["status"]), {"OPTIMAL"})
+
+        self.app.button(key="confirm").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(any("Committed version 1" in message.value for message in self.app.success))
+        with ScheduleStore() as store:
+            committed = store.load("small_feasible")
+        self.assertEqual(committed.version, 1)
+        self.assertEqual(validate_schedule(load_scenario("small_feasible"), committed.appointments), [])
+
+    def test_the_greedy_engine_reports_no_optimality_claim(self):
+        self.app.button(key="generate").click().run()
+        metrics = self.metrics()
+        self.assertEqual(metrics["Solver status"], "GREEDY")
+        self.assertEqual(metrics["Proven optimal"], "no")
+        self.assertFalse(self.frames(("stage", "status", "runtime_seconds", "objective", "best_bound")))
+
     def test_discarding_a_proposal_leaves_the_database_unchanged(self):
         self.app.button(key="generate").click().run()
         self.assertIn("proposal", self.app.session_state)

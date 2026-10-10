@@ -1,20 +1,38 @@
 """Streamlit workflow: load a synthetic scenario, generate a schedule, review, confirm, and export.
 
 SQLite holds committed schedules. A generated proposal stays in Streamlit session
-state until it is confirmed, so discarding it leaves the database untouched.
+state until it is confirmed, so discarding it leaves the database untouched. Only
+the built-in scenario specifications are cached; schedules are solved on demand
+and kept in session state, because a cached result keyed by scenario identifier
+would survive a change to the scenario itself.
 """
 from datetime import datetime
+from time import perf_counter
 import pandas as pd
 import streamlit as st
 from src.export import (APPOINTMENT_COLUMNS, UNSCHEDULED_COLUMNS, appointment_rows, to_csv,
                         unscheduled_rows)
 from src.models import Scenario, ScheduleResult
+from src.optimizer import OptimizationResult, optimize_schedule
 from src.scenarios import load_scenario, load_specs
 from src.scheduler import greedy_schedule
 from src.storage import ScheduleStore, VersionConflict, local
 from src.validator import validate_schedule
 
 PROPOSAL, FLASH = "proposal", "flash"
+ENGINES = {"greedy": "Greedy baseline", "cpsat": "CP-SAT optimizer"}
+CONFIRMABLE_STATUSES = ("OPTIMAL", "FEASIBLE")
+STATUS_NOTES = {
+    "OPTIMAL": "All three objectives are proven optimal. Review and confirm the proposal.",
+    "FEASIBLE": "A valid schedule was found, but not every objective is proven optimal. "
+                "Review and confirm the proposal.",
+    "INFEASIBLE": "The current constraints cannot be satisfied, so there is nothing to confirm. "
+                  "Adjust the inputs and generate again.",
+    "UNKNOWN": "No verifiable schedule was found inside the search budget, so there is nothing to "
+               "confirm. Raise the budget or relax the inputs and generate again.",
+    "GREEDY": "Deterministic greedy baseline. It does not maximize the scheduled count and claims "
+              "no optimality.",
+}
 
 
 @st.cache_data(show_spinner=False)
@@ -22,9 +40,13 @@ def cached_scenario(scenario_id: str) -> Scenario:
     return load_scenario(scenario_id)
 
 
-@st.cache_data(show_spinner="Generating a schedule with the greedy baseline...")
-def cached_schedule(scenario_id: str) -> ScheduleResult:
-    return greedy_schedule(cached_scenario(scenario_id))
+def solve(engine: str, scenario: Scenario, budget: float) -> tuple[ScheduleResult | None, OptimizationResult | None, float]:
+    """Run the selected engine; the greedy baseline reports no solver statistics."""
+    started = perf_counter()
+    if engine == "greedy":
+        return greedy_schedule(scenario), None, perf_counter() - started
+    report = optimize_schedule(scenario, time_limit_seconds=budget)
+    return report.result, report, report.runtime_seconds
 
 
 def participant_frame(scenario: Scenario) -> pd.DataFrame:
@@ -65,6 +87,32 @@ def flash(message: str, kind: str = "success") -> None:
     st.session_state[FLASH] = (kind, message)
 
 
+def stage_frame(report: OptimizationResult) -> pd.DataFrame:
+    return pd.DataFrame([{"stage": stage.name, "status": stage.status,
+                          "runtime_seconds": round(stage.runtime_seconds, 3),
+                          "objective": stage.objective, "best_bound": stage.best_bound}
+                         for stage in report.stages])
+
+
+def report_panel(report: OptimizationResult | None, status: str, runtime: float) -> None:
+    """Solver status, total runtime, and the staged objectives behind a proposal."""
+    columns = st.columns(3)
+    columns[0].metric("Solver status", status)
+    columns[1].metric("Total runtime", f"{runtime:.2f} s")
+    columns[2].metric("Proven optimal", "yes" if report is not None and report.optimal else "no")
+    st.caption(STATUS_NOTES.get(status, status))
+    if report is None:
+        return
+    st.caption(f"{report.candidate_count} candidate appointments enumerated. The search budget covers "
+               "the CP-SAT searches only; candidate enumeration and model construction add to the "
+               "total runtime above, so the total can exceed the budget.")
+    with st.expander("Solver stages"):
+        st.dataframe(stage_frame(report), width="stretch", hide_index=True)
+        st.caption("Objectives are solved in order: scheduled count, changes to existing "
+                   "appointments, then summed target-date deviation. A later stage runs only while "
+                   "budget remains, and `NOT_RUN` means the budget was exhausted first.")
+
+
 st.set_page_config(page_title="Clinical Trial Visit Scheduler", layout="wide")
 st.title("Clinical Trial Visit Scheduler")
 
@@ -79,6 +127,13 @@ with st.sidebar:
     st.caption(specs[scenario_id]["description"])
     st.caption(f"Seed {specs[scenario_id]['seed']} · horizon from {specs[scenario_id]['start_date']} "
                f"over {specs[scenario_id]['days']} days")
+    st.header("Engine")
+    engine = st.radio("Scheduling engine", list(ENGINES), format_func=ENGINES.get, key="engine")
+    budget = st.number_input("CP-SAT search budget (seconds)", min_value=1.0, max_value=120.0,
+                             value=5.0, step=1.0, key="budget",
+                             disabled=engine == "greedy", help="Shared across the three CP-SAT "
+                             "search stages. Total runtime also includes candidate enumeration "
+                             "and model construction.")
 
 try:
     scenario = cached_scenario(scenario_id)
@@ -99,9 +154,13 @@ if proposal and proposal["scenario_id"] != scenario_id:
 with st.sidebar:
     st.header("Workflow")
     if st.button("Generate schedule", type="primary", width="stretch", key="generate"):
-        st.session_state[PROPOSAL] = {"scenario_id": scenario_id, "base_version": committed.version,
-                                      "generated_at": datetime.now().astimezone(),
-                                      "result": cached_schedule(scenario_id)}
+        with st.spinner(f"Generating a schedule with the {ENGINES[engine].lower()}..."):
+            result, report, runtime = solve(engine, scenario, float(budget))
+        st.session_state[PROPOSAL] = {"scenario_id": scenario_id, "engine": engine,
+                                      "base_version": committed.version, "scenario": scenario,
+                                      "generated_at": datetime.now().astimezone(), "result": result,
+                                      "report": report, "runtime": runtime,
+                                      "status": report.status if report else result.status}
         st.rerun()
     if proposal and st.button("Discard proposal", width="stretch", key="discard"):
         del st.session_state[PROPOSAL]
@@ -142,50 +201,55 @@ with schedule_tab:
     if proposal is None:
         st.info("Select a scenario and choose Generate schedule to produce a proposal.")
     else:
-        result = proposal["result"]
-        errors = validate_schedule(scenario, result.appointments)
-        scheduled = len(result.appointments)
-        head = st.columns(4)
-        head[0].metric("Scheduled", f"{scheduled}/{visits}")
-        head[1].metric("Unscheduled", len(result.unscheduled))
-        head[2].metric("Base version", proposal["base_version"])
-        head[3].metric("Independent validation", "failed" if errors else "passed")
-        st.caption(f"Status {result.status} · generated {proposal['generated_at']:%Y-%m-%d %H:%M:%S %Z}")
-        if errors:
-            st.error("The independent validator rejected this proposal; it cannot be confirmed.")
-            st.code("\n".join(errors[:20]))
-
-        st.subheader("Proposed appointments")
-        rows = appointment_rows(scenario, result.appointments)
-        st.dataframe(frame(rows, APPOINTMENT_COLUMNS), width="stretch", hide_index=True)
-        download("Download appointments CSV", to_csv(rows, APPOINTMENT_COLUMNS),
-                 f"{scenario_id}_proposed_appointments.csv", "proposal_csv")
-
-        st.subheader("Unscheduled visits")
-        if result.unscheduled:
-            unscheduled = unscheduled_rows(scenario, result.unscheduled)
-            st.dataframe(frame(unscheduled, UNSCHEDULED_COLUMNS), width="stretch", hide_index=True)
-            st.caption("`no_candidate_slots` means no slot satisfied the window, availability, clinic hours, "
-                       "and resource rules. `resource_competition_or_precedence` means candidates existed but "
-                       "lost to competition for shared resources or to a missing predecessor. Counts are "
-                       "candidates before competition and precedence checks, not a minimal conflict set.")
-            download("Download unscheduled CSV", to_csv(unscheduled, UNSCHEDULED_COLUMNS),
-                     f"{scenario_id}_unscheduled.csv", "unscheduled_csv")
+        result, report = proposal["result"], proposal["report"]
+        st.caption(f"{ENGINES[proposal['engine']]} · generated "
+                   f"{proposal['generated_at']:%Y-%m-%d %H:%M:%S %Z}")
+        report_panel(report, proposal["status"], proposal["runtime"])
+        if result is None:
+            st.error("The engine returned no schedule, so there is nothing to review or confirm. "
+                     "The committed schedule is unchanged.")
         else:
-            st.success("Every protocol visit was scheduled.")
+            errors = validate_schedule(proposal["scenario"], result.appointments)
+            head = st.columns(4)
+            head[0].metric("Scheduled", f"{len(result.appointments)}/{visits}")
+            head[1].metric("Unscheduled", len(result.unscheduled))
+            head[2].metric("Base version", proposal["base_version"])
+            head[3].metric("Independent validation", "failed" if errors else "passed")
+            if errors:
+                st.error("The independent validator rejected this proposal; it cannot be confirmed.")
+                st.code("\n".join(errors[:20]))
 
-        st.subheader("Confirmation")
-        note = st.text_input("Change note", placeholder="Why this schedule is being committed", key="note")
-        if st.button("Confirm proposal", type="primary", disabled=bool(errors), key="confirm"):
-            try:
-                with ScheduleStore() as store:
-                    saved = store.confirm(scenario_id, proposal["base_version"], result.appointments, note)
-            except VersionConflict as error:
-                st.error(f"{error}. Generate the proposal again from the current version.")
+            st.subheader("Proposed appointments")
+            rows = appointment_rows(proposal["scenario"], result.appointments)
+            st.dataframe(frame(rows, APPOINTMENT_COLUMNS), width="stretch", hide_index=True)
+            download("Download appointments CSV", to_csv(rows, APPOINTMENT_COLUMNS),
+                     f"{scenario_id}_proposed_appointments.csv", "proposal_csv")
+
+            st.subheader("Unscheduled visits")
+            if result.unscheduled:
+                unscheduled = unscheduled_rows(proposal["scenario"], result.unscheduled)
+                st.dataframe(frame(unscheduled, UNSCHEDULED_COLUMNS), width="stretch", hide_index=True)
+                st.caption("`no_candidate_slots` means no slot satisfied the window, availability, clinic hours, "
+                           "and resource rules. `resource_competition_or_precedence` means candidates existed but "
+                           "lost to competition for shared resources or to a missing predecessor. Counts are "
+                           "candidates before competition and precedence checks, not a minimal conflict set.")
+                download("Download unscheduled CSV", to_csv(unscheduled, UNSCHEDULED_COLUMNS),
+                         f"{scenario_id}_unscheduled.csv", "unscheduled_csv")
             else:
-                del st.session_state[PROPOSAL]
-                flash(f"Committed version {saved.version} with {len(saved.appointments)} appointments.")
-                st.rerun()
+                st.success("Every protocol visit was scheduled.")
+
+            st.subheader("Confirmation")
+            note = st.text_input("Change note", placeholder="Why this schedule is being committed", key="note")
+            if st.button("Confirm proposal", type="primary", disabled=bool(errors), key="confirm"):
+                try:
+                    with ScheduleStore() as store:
+                        saved = store.confirm(scenario_id, proposal["base_version"], result.appointments, note)
+                except VersionConflict as error:
+                    st.error(f"{error}. Generate the proposal again from the current version.")
+                else:
+                    del st.session_state[PROPOSAL]
+                    flash(f"Committed version {saved.version} with {len(saved.appointments)} appointments.")
+                    st.rerun()
 
     st.divider()
     st.subheader("Committed schedule")

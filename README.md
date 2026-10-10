@@ -24,11 +24,17 @@ python3 -m unittest discover -s tests -p 'test_core.py' -v
 .venv/bin/python -m streamlit run app.py
 ```
 
-Pick a scenario in the sidebar, review its participants, resources, and visit rules, then choose
-**Generate schedule**. The schedule tab shows the proposed appointments, the unscheduled visits with
-their diagnostic category, and the independent validator's verdict, and it exports both tables as
-CSV. A proposal is confirmed with an optional change note; discarding it leaves the committed
-schedule untouched.
+Pick a scenario in the sidebar, choose the greedy baseline or the CP-SAT optimizer, then choose
+**Generate schedule**. The schedule tab shows the solver status, total runtime, whether every
+objective is proven optimal, the staged objectives, the proposed appointments, the unscheduled
+visits with their diagnostic category, and the independent validator's verdict, and it exports the
+appointment and unscheduled tables as CSV. A proposal is confirmed with an optional change note;
+discarding it leaves the committed schedule untouched. Confirmation is blocked whenever the engine
+returns no schedule, which covers `INFEASIBLE` and an unknown search with no validated incumbent.
+
+The CP-SAT budget applies to the solver searches only. Candidate enumeration and model construction
+are outside it, so the reported total runtime can exceed the budget; the page reports measured
+runtime rather than promising a deadline.
 
 ## Application integration
 
@@ -86,8 +92,8 @@ reach the store, so discarding a proposal cannot modify committed state.
 
 ## Optimization and repair
 
-The Streamlit Generate button currently uses the greedy baseline. The following engine APIs are
-ready for application integration; they do not modify the database or Streamlit state.
+The Streamlit Generate button runs either engine. The following engine APIs do not modify the
+database or Streamlit state.
 
 ```python
 from src.optimizer import optimize_schedule
