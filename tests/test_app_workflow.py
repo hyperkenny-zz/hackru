@@ -525,6 +525,40 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(store.current_version("small_feasible"), 1)
             self.assertEqual({event.event_type for event in store.history("small_feasible")}, {"add"})
 
+    def test_timeline_filters_and_appointment_explanation_leave_committed_state_unchanged(self):
+        self.commit_initial_schedule()
+        self.app.selectbox(key="committed_small_feasible_day").select(date(2026, 10, 13)).run()
+        self.app.selectbox(key="committed_small_feasible_group").select("Participant").run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(self.app.get("vega_lite_chart"))
+        self.assertTrue(any("Target calculation" in str(table.value) for table in self.app.table))
+        with ScheduleStore() as store:
+            saved = store.load("small_feasible")
+            self.assertEqual(saved.version, 1)
+            self.assertEqual(len(saved.appointments), 9)
+
+    def test_disruption_review_lists_direct_and_dependent_visits_before_solving(self):
+        self.commit_initial_schedule()
+        self.add_nurse_outage()
+        from src.schedule_views import IMPACT_COLUMNS
+        affected = self.frames(IMPACT_COLUMNS)[0]
+        self.assertEqual(len(affected), 3)
+        self.assertEqual(list(affected["impact"]), ["Directly affected", "Successor to review", "Successor to review"])
+        self.assertEqual(self.metrics()["Directly affected appointments"], "1")
+        self.assertEqual(self.metrics()["Successors to review"], "2")
+        self.assertIn("Download affected appointments CSV", self.download_labels())
+        self.assertNotIn(REPAIR, self.app.session_state)
+        self.app.button(key="repair").click().run()
+        self.assertFalse(self.app.exception)
+        self.app.selectbox(key="repair_small_feasible_group").select("Participant").run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(self.app.get("vega_lite_chart"))
+        with ScheduleStore() as store:
+            self.assertEqual(store.current_version("small_feasible"), 1)
+        self.app.button(key="discard_repair").click().run()
+        self.assertFalse(self.frames(IMPACT_COLUMNS))
+        self.assertEqual(self.metrics()["Directly affected appointments"], "0")
+
     def test_a_pinned_appointment_is_never_released_to_absorb_an_outage(self):
         self.commit_initial_schedule()
         self.add_nurse_outage()

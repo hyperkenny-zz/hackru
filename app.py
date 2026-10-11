@@ -20,6 +20,8 @@ from src.scenarios import load_scenario, load_specs
 from src.scheduler import greedy_schedule
 from src.storage import ScheduleStore, VersionConflict, local
 from src.validator import validate_schedule
+from src.schedule_views import IMPACT_COLUMNS, disruption_impacts, impact_rows
+from src.ui_schedule import render_appointment_details, render_timeline
 
 PROPOSAL, REPAIR, DISRUPTIONS, FLASH = "proposal", "repair_proposal", "disruptions", "flash"
 ENGINES = {"greedy": "Greedy baseline", "cpsat": "CP-SAT optimizer"}
@@ -314,6 +316,10 @@ with schedule_tab:
                 st.error("The independent validator rejected this proposal; it cannot be confirmed.")
                 st.code("\n".join(errors[:20]))
 
+            render_timeline((("Proposed", proposal["scenario"], result.appointments, {}),),
+                            key=f"proposed_{scenario_id}")
+            render_appointment_details(proposal["scenario"], result.appointments, key=f"proposed_{scenario_id}")
+
             st.subheader("Proposed appointments")
             rows = appointment_rows(proposal["scenario"], result.appointments)
             st.dataframe(frame(rows, APPOINTMENT_COLUMNS), width="stretch", hide_index=True)
@@ -354,6 +360,9 @@ with schedule_tab:
     else:
         st.caption(f"Version {committed.version} confirmed {local(committed.confirmed_at):%Y-%m-%d %H:%M %Z}"
                    + (f" · {committed.reason}" if committed.reason else ""))
+        render_timeline((("Committed", base_scenario, committed.appointments, {}),),
+                        key=f"committed_{scenario_id}")
+        render_appointment_details(base_scenario, committed.appointments, key=f"committed_{scenario_id}")
         committed_rows = appointment_rows(base_scenario, committed.appointments)
         st.dataframe(frame(committed_rows, APPOINTMENT_COLUMNS), width="stretch", hide_index=True)
         download("Download committed CSV", to_csv(committed_rows, APPOINTMENT_COLUMNS),
@@ -415,6 +424,24 @@ with repair_tab:
     else:
         st.caption("No disruption inputs recorded in this session.")
 
+    impacts = disruption_impacts(draft_scenario, committed.appointments)
+    if committed.version:
+        st.subheader("Appointments affected by the draft inputs")
+        direct_count = sum(item.category == "Directly affected" for item in impacts)
+        with st.container(horizontal=True):
+            st.metric("Directly affected appointments", direct_count, border=True)
+            st.metric("Successors to review", len(impacts) - direct_count, border=True)
+        if impacts:
+            affected_rows = impact_rows(committed.appointments, impacts)
+            st.dataframe(frame(affected_rows, IMPACT_COLUMNS), hide_index=True, width="stretch",
+                         alt="Appointments directly affected by draft inputs and dependent visits to review")
+            st.caption("Successors are flagged for review because a predecessor is affected. "
+                       "They may remain unchanged; this list does not predict which visits must move.")
+            download("Download affected appointments CSV", to_csv(affected_rows, IMPACT_COLUMNS),
+                     f"{scenario_id}_affected_appointments.csv", "impact_csv")
+        else:
+            st.info("No committed appointments are affected by the current draft inputs.")
+
     st.subheader("Repair proposal")
     if committed.version == 0:
         st.info("Confirm a schedule first. A repair proposal starts from the committed schedule and "
@@ -446,7 +473,7 @@ with repair_tab:
             else:
                 st.session_state[REPAIR] = {
                     "scenario_id": scenario_id, "scenario": draft_scenario, "proposal": generated,
-                    "records": records, "pinned": current_pins,
+                    "records": records, "pinned": current_pins, "existing": committed.appointments,
                     "prior_errors": len(prior_errors), "generated_at": datetime.now().astimezone()}
                 st.rerun()
 
@@ -486,6 +513,23 @@ with repair_tab:
                 st.warning(f"This proposal was generated from version "
                            f"{repair['proposal'].base_version}, but version {committed.version} is "
                            "committed now. Generate the proposal again.")
+
+            repair_base = repair.get("existing")
+            if repair_base is None:
+                with ScheduleStore() as store:
+                    repair_base = store.load(scenario_id, repair["proposal"].base_version).appointments
+            before_status = {item.key: item.category for item in
+                             disruption_impacts(repair["scenario"], repair_base)}
+            after_status = {a.key: "Unchanged" for a in repaired.appointments}
+            for event, old, new in changes:
+                if old is not None:
+                    before_status.setdefault(old.key, "Cancelled" if event == "cancel" else "Moved")
+                if new is not None:
+                    after_status[new.key] = "Added" if event == "add" else "Moved"
+            render_timeline((("Before repair", repair["scenario"], repair_base, before_status),
+                             ("After repair", repair["scenario"], repaired.appointments, after_status)),
+                            key=f"repair_{scenario_id}")
+            render_appointment_details(repair["scenario"], repaired.appointments, key=f"repair_{scenario_id}")
 
             st.subheader("Changes")
             if changes:

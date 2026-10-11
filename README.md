@@ -48,6 +48,26 @@ released automatically: if they make the repair infeasible, the page says to adj
 inputs or unpin those appointments. Confirmation uses the proposal's base version, so a schedule
 committed meanwhile is reported as a conflict instead of being overwritten.
 
+## Timeline and disruption review
+
+The Schedule tab includes a daily appointment timeline for proposals and committed schedules.
+Choose a clinic day and group by resource or participant. Resource lanes repeat appointments
+across their assigned resources and shade outage intervals. Times are rendered as clinic wall-clock
+minutes in America/New_York so the viewer's browser timezone does not shift the chart. Hover for
+appointment times, visit windows, target dates, and resource assignments. Appointment details also
+show the reference-date calculation, rule version, duration, requirements, and predecessors.
+
+The Repair tab lists directly affected appointments as soon as disruption inputs are added, before
+running the optimizer. Dependent visits are separately marked as successors to review; they are not
+necessarily invalid and may remain unchanged. The list can be downloaded as CSV. The independent
+validator remains the authority for full schedule validity.
+
+A repair proposal includes a daily before/after timeline with unchanged, moved, added, cancelled,
+and affected placements. Its before view uses the exact base appointments captured when the
+proposal was generated, even if a newer committed version appears. These views and filters do not
+change committed state or rerun the solver. Confirmation still validates the proposal and checks
+the base version atomically.
+
 ## Application integration
 
 Construct immutable objects from `src.models`, then call:
